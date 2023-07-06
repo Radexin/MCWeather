@@ -3,6 +3,8 @@ package net.radexin.mcweather;
 import com.mojang.logging.LogUtils;
 import net.minecraft.client.Minecraft;
 import net.minecraft.network.chat.Component;
+import net.minecraft.world.level.storage.LevelData;
+import net.minecraft.world.level.storage.WorldData;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.client.event.CustomizeGuiOverlayEvent;
 import net.minecraftforge.common.ForgeMod;
@@ -26,7 +28,7 @@ public class MCWeather
 {
     public static final String MOD_ID = "mcweather";
     private static final Logger LOGGER = LogUtils.getLogger();
-    private static int tickCounter = 0;
+    private static int tickCounter = -1;
 
     public MCWeather()
     {
@@ -39,11 +41,18 @@ public class MCWeather
         ModLoadingContext.get().registerConfig(ModConfig.Type.COMMON, Config.SPEC);
     }
 
+    public static void updateWeather()
+    {
+        Minecraft.getInstance().player.sendSystemMessage(Component.literal("Real weather updating..."));
+        Minecraft.getInstance().level.setRainLevel(1);
+        Minecraft.getInstance().level.getLevelData().setRaining(true);
+    }
+
     private void commonSetup(final FMLCommonSetupEvent event)
     {
         // Check for terranew mod which is required for calculating position
         /*
-        if (ModList.get().isLoaded("teranew"))
+        if (ModList.get().isLoaded("terranew"))
         {
 
         }
@@ -56,8 +65,13 @@ public class MCWeather
         public static void onTick(TickEvent.ClientTickEvent event)
         {
             if (event.phase == TickEvent.Phase.END) {
-                tickCounter++;
-                if (Minecraft.getInstance().player != null) {
+                //tickCounter++;
+                if (tickCounter==-1||tickCounter>=6000)
+                {
+                    if (Minecraft.getInstance().level != null) {
+                        tickCounter = 0;
+                        updateWeather();
+                    }
                 }
             }
         }
