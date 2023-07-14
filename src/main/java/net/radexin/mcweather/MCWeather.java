@@ -1,6 +1,7 @@
 package net.radexin.mcweather;
 
-import com.google.gson.Gson;
+import com.google.gson.*;
+import com.mojang.authlib.minecraft.client.ObjectMapper;
 import com.mojang.logging.LogUtils;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
@@ -19,6 +20,7 @@ import net.minecraft.server.level.FullChunkStatus;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.players.PlayerList;
 import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.GameRules;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.chunk.ImposterProtoChunk;
 import net.minecraft.world.level.chunk.LevelChunk;
@@ -32,6 +34,7 @@ import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.level.ChunkEvent;
 import net.minecraftforge.event.level.ChunkTicketLevelUpdatedEvent;
+import net.minecraftforge.event.level.LevelEvent;
 import net.minecraftforge.eventbus.api.IEventBus;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.ModList;
@@ -45,9 +48,11 @@ import net.minecraftforge.server.ServerLifecycleHooks;
 import org.jetbrains.annotations.NotNull;
 import org.slf4j.Logger;
 
-import javax.json.JsonObject;
+import javax.json.Json;
+import javax.json.JsonValue;
 import java.awt.*;
 import java.io.*;
+import java.lang.reflect.Type;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.ByteBuffer;
@@ -56,6 +61,8 @@ import java.nio.channels.FileChannel;
 import java.nio.channels.GatheringByteChannel;
 import java.nio.channels.ScatteringByteChannel;
 import java.nio.charset.Charset;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
@@ -66,6 +73,19 @@ public class MCWeather
     public static final String MOD_ID = "mcweather";
     private static final Logger LOGGER = LogUtils.getLogger();
     private static int tickCounter = -1;
+
+    public static long convertToTicks(String realTime) {
+        if (realTime.charAt(12)==':') {realTime=realTime.substring(0,11)+"0"+realTime.substring(11);}
+        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
+        LocalDateTime dateTime = LocalDateTime.parse(realTime, formatter);
+
+        int hours = dateTime.getHour();
+        int minutes = dateTime.getMinute();
+        int ticksPerHour = 1000;
+        int totalTicks = ((hours % 24) * ticksPerHour) + (minutes * (ticksPerHour / 60));
+
+        return (totalTicks + 18000) % 24000;
+    }
 
     public MCWeather()
     {
@@ -79,7 +99,7 @@ public class MCWeather
     }
 
     public static String requestWeather(float x, float y) throws IOException {
-        URL url = new URL("http://api.weatherapi.com/v1/current.json?key=&q="+x+","+y+"&aqi=no");
+        URL url = new URL("http://api.weatherapi.com/v1/current.json?key=APIKEY&q="+x+","+y+"&aqi=no");
         HttpURLConnection connection = (HttpURLConnection) url.openConnection();
         connection.setRequestMethod("GET");
 
@@ -102,17 +122,63 @@ public class MCWeather
 
     public static void updateWeather()
     {
-        Minecraft.getInstance().player.sendSystemMessage(Component.literal("Real weather updating..."));
         try {
-            Gson g = new Gson();
-            JsonObject weather = g.fromJson(requestWeather(1F,1F), JsonObject.class);
-            String rawTime = weather.getJsonObject("location").getString("localtime");
-            String condition = weather.getJsonObject("condition").getString("text");
+            // JSON Parsing
+            JsonObject weather = JsonParser.parseString(requestWeather(1F, 1F)).getAsJsonObject();
+            String rawTime = weather.getAsJsonObject("location").get("localtime").getAsString();
+            String condition = weather.getAsJsonObject("current").getAsJsonObject("condition").get("text").getAsString();
+            // Set real time
+            Minecraft.getInstance().level.getLevelData().setGameTime(convertToTicks(rawTime));
+            // Check for weather
+            if (Config.setWeather)
+            {
+                // Intensity
+                float intensityRain = 0.1F;
+                float intensityThunder = 0F;
+                // Checks
+                if (condition.indexOf("outbreaks")+condition.indexOf("light")+condition.indexOf("possible")+condition.indexOf("drizzle")>0)
+                {
+                    intensityRain = 0.2F;
+                    intensityThunder = 0.4F;
+                }
+                if (condition.indexOf("blowing")+condition.indexOf("moderate")>0)
+                {
+                    intensityRain = 0.5F;
+                    intensityThunder = 0.7F;
+                }
+                if (condition.indexOf("heavy")>0)
+                {
+                    intensityRain = 0.7F;
+                    intensityThunder = 0.8F;
+                }
+                if (condition.indexOf("torrential")>0)
+                {
+                    intensityRain = 1F;
+                    intensityThunder = 1F;
+                }
+                // Detecting rain or snow
+                if (condition.indexOf("rain")+condition.indexOf("snow")+condition.indexOf("drizzle")+condition.indexOf("blizzard")>0)
+                {
+                    // Rain and snow are both using setRaining
+                    Minecraft.getInstance().level.setRainLevel(intensityRain);
+                    Minecraft.getInstance().level.getLevelData().setRaining(true);
+                }
+                // Detecting thunder
+                if (condition.indexOf("thunder")>0)
+                {
+                    // Set thunder
+                    Minecraft.getInstance().level.setThunderLevel(intensityThunder);
+                }
+                // Return to set clear weather if not enabled in config
+                return;
+            }
+            // Clear weather
+            Minecraft.getInstance().level.setRainLevel(0F);
+            Minecraft.getInstance().level.getLevelData().setRaining(false);
+            Minecraft.getInstance().level.setThunderLevel(0F);
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
-        Minecraft.getInstance().level.setRainLevel(1);
-        Minecraft.getInstance().level.getLevelData().setRaining(true);
     }
 
     private void commonSetup(final FMLCommonSetupEvent event)
@@ -131,18 +197,18 @@ public class MCWeather
         @SubscribeEvent
         public static void onTick(TickEvent.ClientTickEvent event)
         {
-            if (event.phase == TickEvent.Phase.END) {
-                tickCounter++;
-                if (tickCounter==-1||tickCounter>=6000)
-                {
-                    if (Minecraft.getInstance().level != null) {
-                        tickCounter = 0;
+            if (event.phase == TickEvent.Phase.END)
+            {
+                if (Minecraft.getInstance().level != null) {
+                    if (tickCounter==-1||tickCounter>=6000)
+                    {
+                        tickCounter = -1;
                         updateWeather();
                     }
+                    tickCounter++;
                 }
             }
         }
-
         /*@SubscribeEvent
         public static void onChunkLoad(ChunkEvent.Load event) {
             if (Minecraft.getInstance().level != null) {
@@ -1073,6 +1139,15 @@ public class MCWeather
                 buffer.clear();
             }
         }*/
+    }
+    @Mod.EventBusSubscriber(modid = MOD_ID, value = Dist.DEDICATED_SERVER)
+    public static class ServerForgeEvents
+    {
+        @SubscribeEvent
+        public static void onLoad(LevelEvent.Load event)
+        {
+            Minecraft.getInstance().level.getGameRules().getRule(GameRules.RULE_DAYLIGHT).set(false, ServerLifecycleHooks.getCurrentServer());
+        }
     }
     @Mod.EventBusSubscriber(modid = MOD_ID, bus = Mod.EventBusSubscriber.Bus.MOD, value = Dist.CLIENT)
     public static class ClientModEvents
